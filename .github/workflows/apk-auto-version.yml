@@ -7,12 +7,10 @@ on:
         description: "Versi APK, contoh 27.4 atau 27.4.1"
         required: true
         type: string
-
       release_id:
         description: "ID GitHub staging release"
         required: true
         type: string
-
       asset_name:
         description: "Nama file APK staging"
         required: true
@@ -31,123 +29,79 @@ jobs:
       ASSET_NAME: ${{ inputs.asset_name }}
 
     steps:
-
-      # =========================================================
-      # 1. Checkout repository
-      # =========================================================
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # =========================================================
-      # 2. Validate version
-      # =========================================================
       - name: Validate version
         shell: bash
         run: |
           set -euo pipefail
-
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
             echo "Format versi tidak valid: $VERSION"
-            echo "Contoh yang diperbolehkan:"
-            echo "  27.4"
-            echo "  27.4.1"
             exit 1
           fi
 
-          echo "Version: $VERSION"
-
-      # =========================================================
-      # 3. Calculate Android versionCode
-      #
-      # 27.4   -> 27004000
-      # 27.4.1 -> 27004001
-      # =========================================================
       - name: Calculate versionCode
         shell: bash
         run: |
           set -euo pipefail
-
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-
           PATCH="${PATCH:-0}"
-
           VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
-
           if (( VERSION_CODE <= 0 )); then
             echo "versionCode tidak valid."
             exit 1
           fi
-
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
-
           echo "Version Name : $VERSION"
           echo "Version Code : $VERSION_CODE"
 
-      # =========================================================
-      # 4. Prepare Android tools
-      # =========================================================
-      - name: Prepare tools
+      - name: Prepare Android tools
         shell: bash
         run: |
           set -euo pipefail
-
           sudo apt-get update
           sudo apt-get install -y wget unzip jq
-
           wget -q \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar \
             -O apktool.jar
-
-          echo "Android SDK:"
-          echo "$ANDROID_HOME"
 
           AAPT=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
           ZIPALIGN=$(find "$ANDROID_HOME/build-tools" -type f -name zipalign | sort -V | tail -1)
 
-          if [[ -z "$AAPT" || -z "$APKSIGNER" || -z "$ZIPALIGN" ]]; then
-            echo "Android Build Tools tidak ditemukan."
-            exit 1
-          fi
+          test -n "$AAPT"
+          test -n "$APKSIGNER"
+          test -n "$ZIPALIGN"
 
           echo "AAPT=$AAPT" >> "$GITHUB_ENV"
           echo "APKSIGNER=$APKSIGNER" >> "$GITHUB_ENV"
           echo "ZIPALIGN=$ZIPALIGN" >> "$GITHUB_ENV"
 
-          echo "AAPT      : $AAPT"
-          echo "APKSIGNER : $APKSIGNER"
-          echo "ZIPALIGN  : $ZIPALIGN"
-
-      # =========================================================
-      # 5. Get staging release asset
-      # =========================================================
       - name: Get staging APK
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
           API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
 
-          echo "Mencari asset:"
-          echo "$ASSET_NAME"
-
-          ASSET_ID=$(
+          RELEASE_JSON=$(
             curl -fsSL \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
-              "$API/releases/$RELEASE_ID/assets?per_page=100" |
+              "$API/releases/$RELEASE_ID"
+          )
+
+          echo "$RELEASE_JSON" > staging-release.json
+
+          ASSET_ID=$(
+            echo "$RELEASE_JSON" |
             jq -r --arg NAME "$ASSET_NAME" \
-              '.[] | select(.name == $NAME) | .id' |
+              '.assets[] | select(.name == $NAME) | .id' |
             head -n 1
           )
 
           if [[ -z "$ASSET_ID" || "$ASSET_ID" == "null" ]]; then
-            echo "Asset tidak ditemukan."
-            echo "Release ID : $RELEASE_ID"
-            echo "Asset      : $ASSET_NAME"
+            echo "Asset staging tidak ditemukan: $ASSET_NAME"
             exit 1
           fi
 
@@ -160,188 +114,81 @@ jobs:
             "$API/releases/assets/$ASSET_ID" \
             -o input.apk
 
-          echo "APK staging berhasil di-download."
-
           ls -lh input.apk
 
-      # =========================================================
-      # 6. Check original APK
-      # =========================================================
       - name: Inspect original APK
         shell: bash
         run: |
           set -euo pipefail
+          "$AAPT" dump badging input.apk | grep "^package:"
 
-          echo "=== ORIGINAL APK ==="
-
-          "$AAPT" dump badging input.apk | grep -E \
-            "package:|application-label:" | head -n 5
-
-          echo
-          echo "APK size:"
-          ls -lh input.apk
-
-      # =========================================================
-      # 7. Decode APK
-      #
-      # -s = keep original dex files
-      # =========================================================
-      - name: Decode APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          java -jar apktool.jar d \
-            -s \
-            -f \
-            input.apk \
-            -o decoded
-
-          echo "APK berhasil didecode."
-
-      # =========================================================
-      # 8. Change versionName + versionCode
-      # =========================================================
-      - name: Update Android version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          import xml.etree.ElementTree as ET
-
-          path = "decoded/AndroidManifest.xml"
-
-          ANDROID_NS = "http://schemas.android.com/apk/res/android"
-          ET.register_namespace("android", ANDROID_NS)
-
-          tree = ET.parse(path)
-          root = tree.getroot()
-
-          root.set(
-              f"{{{ANDROID_NS}}}versionName",
-              "${VERSION}"
-          )
-
-          root.set(
-              f"{{{ANDROID_NS}}}versionCode",
-              "${VERSION_CODE}"
-          )
-
-          tree.write(
-              path,
-              encoding="utf-8",
-              xml_declaration=True
-          )
-
-          print("AndroidManifest.xml berhasil diperbarui.")
-          print("versionName =", "${VERSION}")
-          print("versionCode =", "${VERSION_CODE}")
-          PY
-
-      # =========================================================
-      # 9. Rebuild APK
-      # =========================================================
-      - name: Rebuild APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          java -jar apktool.jar b \
-            decoded \
-            -o rebuilt.apk
-
-          echo "APK berhasil dibuild ulang."
-
-          ls -lh rebuilt.apk
-
-      # =========================================================
-      # 10. Check rebuilt package/version
-      # =========================================================
-      - name: Verify rebuilt APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== REBUILT APK ==="
-
-          "$AAPT" dump badging rebuilt.apk | grep -E \
-            "package:|application-label:" | head -n 5
-
-          PACKAGE_LINE=$(
-            "$AAPT" dump badging rebuilt.apk |
-            grep "^package:" |
-            head -n 1
-          )
-
-          echo "$PACKAGE_LINE"
+          PACKAGE_LINE=$("$AAPT" dump badging input.apk | grep "^package:" | head -n 1)
 
           if [[ "$PACKAGE_LINE" != *"name='id.kms.motorinfo'"* ]]; then
-            echo "Package ID tidak sesuai:"
-            echo "$PACKAGE_LINE"
+            echo "Package ID bukan id.kms.motorinfo"
             exit 1
           fi
 
-          if [[ "$PACKAGE_LINE" != *"versionName='${VERSION}'"* ]]; then
-            echo "versionName tidak sesuai."
-            exit 1
-          fi
-
-          if [[ "$PACKAGE_LINE" != *"versionCode='${VERSION_CODE}'"* ]]; then
-            echo "versionCode tidak sesuai."
-            exit 1
-          fi
-
-          echo "Version verification OK."
-
-      # =========================================================
-      # 11. Restore KMS signing keystore
-      # =========================================================
       - name: Restore signing keystore
         shell: bash
         env:
           KMS_KEYSTORE_B64: ${{ secrets.KMS_KEYSTORE_B64 }}
         run: |
           set -euo pipefail
-
-          if [[ -z "$KMS_KEYSTORE_B64" ]]; then
-            echo "KMS_KEYSTORE_B64 belum tersedia."
-            exit 1
-          fi
-
+          test -n "$KMS_KEYSTORE_B64"
           printf '%s' "$KMS_KEYSTORE_B64" | base64 --decode > kms.keystore
-
           chmod 600 kms.keystore
 
-          echo "Keystore berhasil dipulihkan."
+      - name: Decode APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -jar apktool.jar d -s -f input.apk -o decoded
 
-      # =========================================================
-      # 12. Zipalign
-      # =========================================================
+      - name: Update Android version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import xml.etree.ElementTree as ET
+
+          path = "decoded/AndroidManifest.xml"
+          ns = "http://schemas.android.com/apk/res/android"
+          ET.register_namespace("android", ns)
+
+          tree = ET.parse(path)
+          root = tree.getroot()
+          root.set(f"{{{ns}}}versionName", "${VERSION}")
+          root.set(f"{{{ns}}}versionCode", "${VERSION_CODE}")
+          tree.write(path, encoding="utf-8", xml_declaration=True)
+          PY
+
+      - name: Rebuild APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -jar apktool.jar b decoded -o rebuilt.apk
+          ls -lh rebuilt.apk
+
+      - name: Verify rebuilt package and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_LINE=$("$AAPT" dump badging rebuilt.apk | grep "^package:" | head -n 1)
+          echo "$PACKAGE_LINE"
+
+          [[ "$PACKAGE_LINE" == *"name='id.kms.motorinfo'"* ]]
+          [[ "$PACKAGE_LINE" == *"versionName='${VERSION}'"* ]]
+          [[ "$PACKAGE_LINE" == *"versionCode='${VERSION_CODE}'"* ]]
+
       - name: Zipalign APK
         shell: bash
         run: |
           set -euo pipefail
+          "$ZIPALIGN" -f -p 4 rebuilt.apk aligned.apk
+          "$ZIPALIGN" -c -v 4 aligned.apk
 
-          "$ZIPALIGN" \
-            -f \
-            -p \
-            4 \
-            rebuilt.apk \
-            aligned.apk
-
-          "$ZIPALIGN" \
-            -c \
-            -v \
-            4 \
-            aligned.apk
-
-          echo "Zipalign verification OK."
-
-      # =========================================================
-      # 13. Sign APK with the SAME KMS key
-      # =========================================================
-      - name: Sign APK
+      - name: Sign APK with KMS signing key
         shell: bash
         env:
           KMS_KEYSTORE_PASSWORD: ${{ secrets.KMS_KEYSTORE_PASSWORD }}
@@ -349,7 +196,6 @@ jobs:
           KMS_KEY_PASSWORD: ${{ secrets.KMS_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
           "$APKSIGNER" sign \
             --ks kms.keystore \
             --ks-pass "pass:$KMS_KEYSTORE_PASSWORD" \
@@ -358,135 +204,47 @@ jobs:
             --out final.apk \
             aligned.apk
 
-          echo "APK berhasil ditandatangani."
-
-      # =========================================================
-      # 14. Verify signature
-      # =========================================================
-      - name: Verify APK signature
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          "$APKSIGNER" verify \
-            --verbose \
-            --print-certs \
-            final.apk
-
-          echo "Signature verification OK."
-
-      # =========================================================
-      # 15. Verify final version again
-      # =========================================================
       - name: Verify final APK
         shell: bash
         run: |
           set -euo pipefail
+          "$APKSIGNER" verify --verbose --print-certs final.apk
 
-          "$AAPT" dump badging final.apk | grep "^package:"
+          PACKAGE_LINE=$("$AAPT" dump badging final.apk | grep "^package:" | head -n 1)
+          echo "$PACKAGE_LINE"
 
-          PACKAGE_LINE=$(
-            "$AAPT" dump badging final.apk |
-            grep "^package:" |
-            head -n 1
-          )
+          [[ "$PACKAGE_LINE" == *"name='id.kms.motorinfo'"* ]]
+          [[ "$PACKAGE_LINE" == *"versionName='${VERSION}'"* ]]
+          [[ "$PACKAGE_LINE" == *"versionCode='${VERSION_CODE}'"* ]]
 
-          if [[ "$PACKAGE_LINE" != *"name='id.kms.motorinfo'"* ]]; then
-            echo "Package ID final APK tidak sesuai."
-            exit 1
-          fi
-
-          if [[ "$PACKAGE_LINE" != *"versionName='${VERSION}'"* ]]; then
-            echo "Final versionName tidak sesuai."
-            exit 1
-          fi
-
-          if [[ "$PACKAGE_LINE" != *"versionCode='${VERSION_CODE}'"* ]]; then
-            echo "Final versionCode tidak sesuai."
-            exit 1
-          fi
-
-          echo "FINAL APK verification OK."
-
-      # =========================================================
-      # 16. Rename final APK
-      # =========================================================
-      - name: Prepare final filename
+      - name: Prepare final asset
         shell: bash
         run: |
           set -euo pipefail
-
-          FINAL_NAME="KMS_Motor_Info_${VERSION}.apk"
-
+          FINAL_NAME="kms_motor_info.apk"
           mv final.apk "$FINAL_NAME"
-
           echo "FINAL_NAME=$FINAL_NAME" >> "$GITHUB_ENV"
-
           ls -lh "$FINAL_NAME"
 
-      # =========================================================
-      # 17. Create final GitHub Release
-      # =========================================================
-      - name: Create final release
+      - name: Replace staging asset with final APK
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
           API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
-          TAG="v${VERSION}"
 
-          echo "Creating release:"
-          echo "$TAG"
+          # Delete the staging asset first. GitHub rejects duplicate filenames
+          # within the same release.
+          curl -fsSL \
+            -X DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "$API/releases/assets/$ASSET_ID"
 
-          RELEASE_RESPONSE=$(
-            curl -fsSL \
-              -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "$API/releases" \
-              -d "$(jq -n \
-                --arg tag "$TAG" \
-                --arg name "KMS Motor Info $VERSION" \
-                '{
-                  tag_name: $tag,
-                  name: $name,
-                  body: "KMS Motor Info APK " + $name,
-                  draft: false,
-                  prerelease: false,
-                  generate_release_notes: false,
-                  make_latest: "true"
-                }'
-              )"
-          )
-
-          RELEASE_URL=$(echo "$RELEASE_RESPONSE" | jq -r '.upload_url')
-          FINAL_RELEASE_ID=$(echo "$RELEASE_RESPONSE" | jq -r '.id')
-
-          if [[ -z "$FINAL_RELEASE_ID" || "$FINAL_RELEASE_ID" == "null" ]]; then
-            echo "Gagal membuat final release."
-            echo "$RELEASE_RESPONSE"
-            exit 1
-          fi
-
-          echo "RELEASE_URL=$RELEASE_URL" >> "$GITHUB_ENV"
-          echo "FINAL_RELEASE_ID=$FINAL_RELEASE_ID" >> "$GITHUB_ENV"
-
-          echo "Final release ID: $FINAL_RELEASE_ID"
-
-      # =========================================================
-      # 18. Upload final APK
-      # =========================================================
-      - name: Upload final APK
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          UPLOAD_URL="${RELEASE_URL%\{*}"
+          RELEASE_JSON=$(cat staging-release.json)
+          UPLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.upload_url' | sed 's/{?name,label}$//')
 
           curl -fL \
             -X POST \
@@ -497,32 +255,37 @@ jobs:
             "${UPLOAD_URL}?name=${FINAL_NAME}" \
             --data-binary "@${FINAL_NAME}"
 
-          echo "Final APK berhasil diupload."
-
-      # =========================================================
-      # 19. Delete staging release
-      # =========================================================
-      - name: Delete staging release
+      - name: Promote staging release to final release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
           API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          TAG="v${VERSION}"
 
           curl -fsSL \
-            -X DELETE \
+            -X PATCH \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
-            "$API/releases/$RELEASE_ID"
+            "$API/releases/$RELEASE_ID" \
+            -d "$(jq -n \
+              --arg tag "$TAG" \
+              --arg name "KMS Motor Info $VERSION" \
+              --arg body "KMS Motor Info APK $VERSION" \
+              '{
+                tag_name: $tag,
+                name: $name,
+                body: $body,
+                draft: false,
+                prerelease: false,
+                make_latest: "true"
+              }'
+            )"
 
-          echo "Staging release dihapus."
+          echo "Release $RELEASE_ID dipromosikan menjadi v$VERSION."
 
-      # =========================================================
-      # 20. Final result
-      # =========================================================
       - name: Success
         shell: bash
         run: |
@@ -532,5 +295,5 @@ jobs:
           echo "Version      : $VERSION"
           echo "Version Code : $VERSION_CODE"
           echo "APK          : $FINAL_NAME"
-          echo "Release ID   : $FINAL_RELEASE_ID"
+          echo "Release ID   : $RELEASE_ID"
           echo "=========================================="
