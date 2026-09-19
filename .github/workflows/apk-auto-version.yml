@@ -1,0 +1,14 @@
+name: KMS APK Auto Version
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test GitHub Actions
+        run: |
+          echo "KMS Motor Info GitHub Actions aktif"
+          echo "Workflow berhasil dijalankan."
