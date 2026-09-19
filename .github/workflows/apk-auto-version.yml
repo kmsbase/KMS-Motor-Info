@@ -8,12 +8,14 @@ on:
         required: true
         type: string
       release_id:
-        description: "ID GitHub staging release"
-        required: true
+        description: "ID GitHub staging release (opsional; kosong = cari berdasarkan tag versi)"
+        required: false
+        default: ""
         type: string
       asset_name:
         description: "Nama file APK staging"
-        required: true
+        required: false
+        default: "KMS_Motor_Info_PENDING.apk"
         type: string
 
 permissions:
@@ -83,13 +85,30 @@ jobs:
           set -euo pipefail
           API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
 
-          RELEASE_JSON=$(
-            curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "$API/releases/$RELEASE_ID"
-          )
+          if [[ -z "${RELEASE_ID:-}" ]]; then
+            TAG="v${VERSION}"
+            RELEASE_JSON=$(
+              curl -fsSL \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "$API/releases/tags/${TAG}"
+            )
+            RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.id')
+            if [[ -z "$RELEASE_ID" || "$RELEASE_ID" == "null" ]]; then
+              echo "Staging release tidak ditemukan untuk tag $TAG"
+              exit 1
+            fi
+            echo "RELEASE_ID=$RELEASE_ID" >> "$GITHUB_ENV"
+          else
+            RELEASE_JSON=$(
+              curl -fsSL \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "$API/releases/$RELEASE_ID"
+            )
+          fi
 
           echo "$RELEASE_JSON" > staging-release.json
 
