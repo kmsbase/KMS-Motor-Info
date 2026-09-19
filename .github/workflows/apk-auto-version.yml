@@ -150,16 +150,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 <<'PY'
+          import os
           import xml.etree.ElementTree as ET
 
           path = "decoded/AndroidManifest.xml"
           ns = "http://schemas.android.com/apk/res/android"
           ET.register_namespace("android", ns)
 
+          version = os.environ["VERSION"]
+          version_code = os.environ["VERSION_CODE"]
+
           tree = ET.parse(path)
           root = tree.getroot()
-          root.set(f"{{{ns}}}versionName", "${VERSION}")
-          root.set(f"{{{ns}}}versionCode", "${VERSION_CODE}")
+          root.set(f"{{{ns}}}versionName", version)
+          root.set(f"{{{ns}}}versionCode", version_code)
           tree.write(path, encoding="utf-8", xml_declaration=True)
           PY
 
@@ -280,7 +284,7 @@ jobs:
                 body: $body,
                 draft: false,
                 prerelease: false,
-                make_latest: "true"
+                make_latest: true
               }'
             )"
 
